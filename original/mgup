@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Returns "*" if the current git branch is dirty.
+function evil_git_dirty {
+  [[ $(git diff --shortstat 2> /dev/null | tail -n1) != "" ]] && echo "*"
+}
+
+function evil_git_num_untracked_files {
+  expr `git status --porcelain 2>/dev/null| grep "^??" | wc -l` 
+}
+
+for x in $*; do
+    (
+	cd $x
+
+	branch_name="$(git symbolic-ref HEAD 2>/dev/null)" ||
+	branch_name="(unnamed branch)"     # detached HEAD
+	branch_name=${branch_name##refs/heads/}
+
+	dirty="$(evil_git_dirty)"
+	untracked="$(evil_git_num_untracked_files)"
+	if [ -d .git ]; then
+	    echo "=== $x[$branch_name:$dirty:$untracked] ==="
+	    
+	    git pull --rebase
+	fi
+    )
+done
