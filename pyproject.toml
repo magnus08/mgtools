@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mgtools"
 version = "1.0.0"
-description = "Sequential Git updates and status across multiple repositories"
+description = "Sequential Git updates, status, and branch search across multiple repositories"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
@@ -13,6 +13,7 @@ dependencies = []
 [project.scripts]
 mgup = "mgtools.cli:mgup"
 mgstat = "mgtools.cli:mgstat"
+mgfind = "mgtools.cli:mgfind"
 
 [tool.setuptools]
 packages = ["mgtools"]

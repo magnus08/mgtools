@@ -1,11 +1,13 @@
 # mgtools
 
-Two small commands for working with many Git repositories sequentially:
+Three small commands for working with many Git repositories sequentially:
 
 - **mgup** fetches and rebases the current branch, merges the default branch into
   feature branches, and updates submodules recursively.
 - **mgstat** shows checked-out branches and working-tree changes, with optional
   default-branch filtering and outgoing commit counts.
+- **mgfind** finds repositories containing a branch name or wildcard pattern,
+  including branches that are not checked out and cached remote branches.
 
 Requires Python 3.10+ and Git 2.38+. There are no third-party runtime dependencies.
 The previous scripts are preserved in `original/`.
@@ -17,6 +19,7 @@ Run the executables directly from this checkout:
 ```sh
 ./mgstat --help
 ./mgup --help
+./mgfind --help
 ./mgstat /path/to/projects/*
 ```
 
@@ -26,6 +29,7 @@ To put the commands on your `PATH`, run these commands from this checkout:
 mkdir -p ~/.local/bin
 ln -s "$PWD/mgup" ~/.local/bin/mgup
 ln -s "$PWD/mgstat" ~/.local/bin/mgstat
+ln -s "$PWD/mgfind" ~/.local/bin/mgfind
 ```
 
 Ensure `~/.local/bin` is on your `PATH`. These launchers resolve symlinks back to
@@ -48,6 +52,11 @@ These examples are also included in the corresponding command's `--help` output.
 | `mgstat --non-default *` | Show repositories checked out on a non-default branch |
 | `mgstat --unpushed *` | Include outgoing commit counts and comparison branch |
 | `mgstat --fetch --unpushed *` | Refresh remote information before checking outgoing commits |
+| `mgfind feature/search *` | Find an exact branch in repositories |
+| `mgfind '*ticket-123*' *` | Find branches containing ticket-123 |
+| `mgfind 'feature/*' '/path/to/projects/*'` | Use branch and repository globs |
+| `mgfind --local 'fix/*' *` | Search only local branches |
+| `mgfind --remotes 'origin/feature/*' *` | Search cached remote branches |
 
 Options can be combined:
 
@@ -65,6 +74,42 @@ the commands do not search directories recursively for repositories. Duplicate
 paths and symlinks to the same worktree are processed once. Distinct worktrees
 are processed separately. With no paths, the current directory is used. Put `--`
 before paths whose names begin with a dash, for example `mgstat -- *`.
+
+## Finding branches
+
+Use `mgfind PATTERN [PATH ...]` to locate repositories that contain a branch,
+even when another branch is checked out:
+
+```sh
+mgfind feature/search /path/to/projects/*
+mgfind '*ticket-123*' /path/to/projects/*
+```
+
+```text
+REPOSITORY             BRANCH                     SOURCE
+/path/to/projects/api  feature/ticket-123          local
+/path/to/projects/api  origin/feature/ticket-123   remote (cached)
+/path/to/projects/web  origin/fix/ticket-123       remote (cached)
+```
+
+Patterns match the whole branch name and are case-sensitive. `*` matches any
+sequence (including `/`), `?` matches one character, and `[abc]` or `[0-9]` matches
+one character from a set or range. Wrap a fragment in `*` to search anywhere in
+the name. **Quote wildcard patterns** so your shell does not expand them into
+filenames before `mgfind` sees them.
+
+By default, both local and cached remote branches are searched. Remote branches
+match with or without their remote prefix: `feature/search` can find both
+`feature/search` and `origin/feature/search`; `origin/feature/*` limits matches
+to names with that prefix. Use `--local` or `--remotes` before the pattern to
+search just one kind. The source column distinguishes local branches from
+cached remote refs, and symbolic aliases such as `origin/HEAD` are omitted.
+
+The command never fetches or changes the checkout. Remote results reflect the
+last locally cached state and may be stale or incomplete. Each match gets a
+row; repositories without matches are omitted. No matches prints only the
+table header and exits successfully, like an empty `mgstat` filter. Repository
+paths use the same nonrecursive discovery as the other commands.
 
 ## Status
 
@@ -142,7 +187,7 @@ ineligible repositories are still reported as skipped.
 
 ## Default branches
 
-Both commands use the same detection order:
+`mgup` and `mgstat` use the same detection order:
 
 1. `--default-branch BRANCH` for this invocation.
 2. Per-repository Git configuration: `git config mgtools.defaultBranch develop`.

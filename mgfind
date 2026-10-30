@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Run mgfind directly or through a symlink on PATH."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mgtools.cli import mgfind
+
+if __name__ == "__main__":
+    sys.exit(mgfind())

@@ -1,4 +1,4 @@
-"""Git inspection shared by mgstat and mgup. Inspection never fetches."""
+"""Git inspection shared by the commands. Inspection never fetches."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import glob
 import os
 import subprocess
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TextIO
 
@@ -105,6 +106,38 @@ def discover(git: Git, arguments: list[str]) -> Discovery:
             except GitError as exc:
                 result.errors.append(f"{match}: {exc}")
     return result
+
+
+@dataclass
+class BranchMatch:
+    name: str
+    source: str
+
+
+def matching_branches(git: Git, path: Path, pattern: str, scope: str = "all") -> list[BranchMatch]:
+    namespaces = {"local": ["refs/heads/"], "remotes": ["refs/remotes/"],
+                  "all": ["refs/heads/", "refs/remotes/"]}
+    data = git.run(path, "for-each-ref", "--sort=refname", "--format=%(refname)%00%(symref)",
+                   *namespaces[scope]).stdout
+    # Prefer the longest configured remote name, since remote names may contain '/'.
+    remote_names = sorted(remotes(git, path), key=len, reverse=True) if scope != "local" else []
+    matches = []
+    for line in data.splitlines():
+        ref, symbolic = map(decode, line.split(b"\0"))
+        if ref.startswith("refs/heads/"):
+            name = branch = ref.removeprefix("refs/heads/")
+            source = "local"
+        else:
+            if symbolic:  # origin/HEAD and other aliases are not branches.
+                continue
+            name = ref.removeprefix("refs/remotes/")
+            remote = next((remote for remote in remote_names if name.startswith(remote + "/")),
+                          name.partition("/")[0])
+            branch = name.removeprefix(remote + "/")
+            source = "remote (cached)"
+        if fnmatchcase(branch, pattern) or fnmatchcase(name, pattern):
+            matches.append(BranchMatch(name, source))
+    return matches
 
 
 @dataclass

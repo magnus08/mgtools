@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mgtools.cli import main, parser
-from mgtools.git import Git, default_branch, discover, inspect, push_status
+from mgtools.git import Git, GitError, default_branch, discover, inspect, matching_branches, push_status
 
 
 class OfflineGit(Git):
@@ -182,6 +182,131 @@ class GitTests(unittest.TestCase):
                 code, out, err = self.invoke("mgstat", path)
                 self.assertEqual(code, 0, out + err)
                 self.assertEqual(len(out.splitlines()), 2)
+
+    def test_find_exact_branch_includes_other_checkouts_and_cached_remotes(self):
+        local = self.repo("local repo")
+        remote = self.repo("remote repo")
+        unrelated = self.repo("unrelated")
+        self.raw(local, "branch", "feature/search")
+        self.remote_ref(remote, "origin", "feature/search", self.raw(remote, "rev-parse", "HEAD"))
+        self.raw(unrelated, "branch", "feature/search-more")
+        self.raw(unrelated, "tag", "feature/search")
+        (local / "base.txt").write_text("uncommitted work\n")
+        before = self.raw(local, "status", "--porcelain=v2", "--branch")
+
+        code, out, err = self.invoke("mgfind", "feature/search", self.root / "*")
+
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(len(out.splitlines()), 3)
+        self.assertIn(str(local), out)
+        self.assertIn(str(remote), out)
+        self.assertNotIn(str(unrelated), out)
+        self.assertIn("origin/feature/search", out)
+        self.assertIn("remote (cached)", out)
+        self.assertEqual(self.raw(local, "status", "--porcelain=v2", "--branch"), before)
+        self.assertTrue(all(args[0] in {"rev-parse", "for-each-ref", "remote"}
+                            for _, args in self.git.commands))
+
+    def test_find_globs_match_whole_names_case_sensitively_and_cross_slashes(self):
+        path = self.repo()
+        names = ["feature/ABC-123", "feature/nested/ABC-124", "fix/ABC-125", "fix/abc-123"]
+        for name in names:
+            self.raw(path, "branch", name)
+        cases = {
+            "*ABC-12[34]": names[:2],
+            "feature/*": names[:2],
+            "fix/ABC-12?": [names[2]],
+            "*abc*": [names[3]],
+            "ABC-123": [],
+        }
+        for pattern, expected in cases.items():
+            with self.subTest(pattern=pattern):
+                matches = matching_branches(self.git, path, pattern)
+                self.assertEqual([match.name for match in matches], expected)
+
+    def test_find_scopes_and_remote_prefixes_omit_symbolic_aliases(self):
+        path = self.repo()
+        oid = self.raw(path, "rev-parse", "HEAD")
+        self.remote(path, "team/review")
+        self.remote_ref(path, "team/review", "main", oid)
+        self.remote_head(path, "team/review", "main")
+        self.assertEqual(
+            [(match.name, match.source) for match in matching_branches(self.git, path, "main")],
+            [("main", "local"), ("origin/main", "remote (cached)"), ("team/review/main", "remote (cached)")],
+        )
+        cases = [
+            (["--local", "*"], ["main"]),
+            (["--remotes", "*"], ["origin/main", "team/review/main"]),
+            (["--remotes", "origin/*"], ["origin/main"]),
+            (["--remotes", "team/review/*"], ["team/review/main"]),
+        ]
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                code, out, err = self.invoke("mgfind", *arguments, path)
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual([row.split()[1] for row in out.splitlines()[1:]], expected)
+
+    def test_find_handles_detached_worktrees_and_duplicate_paths(self):
+        path = self.repo("repo with spaces")
+        self.raw(path, "branch", "feature/search")
+        worktree = self.root / "detached worktree"
+        self.raw(path, "worktree", "add", "-q", "--detach", str(worktree))
+        code, out, err = self.invoke("mgfind", "feature/*", path, worktree, path)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(len(out.splitlines()), 3)
+        self.assertIn(str(path), out)
+        self.assertIn(str(worktree), out)
+
+    def test_find_empty_repositories_and_no_matches_print_only_header(self):
+        normal = self.repo()
+        empty = self.repo("empty", empty=True)
+        code, out, err = self.invoke("mgfind", "missing-*", normal, empty)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines(), ["REPOSITORY  BRANCH  SOURCE"])
+
+    def test_find_defaults_to_current_directory(self):
+        path = self.repo()
+        previous = Path.cwd()
+        try:
+            os.chdir(path)
+            code, out, err = self.invoke("mgfind", "--local", "main")
+        finally:
+            os.chdir(previous)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[1].split(), [".", "main", "local"])
+
+    def test_find_reports_path_errors_and_continues_search(self):
+        path = self.repo()
+        code, out, err = self.invoke("mgfind", "main", self.root / "missing-*", path)
+        self.assertEqual(code, 1)
+        self.assertIn(str(path), out)
+        self.assertIn("no matching path", err)
+        code, _, err = self.invoke("mgfind", "main", self.root / "missing-*")
+        self.assertEqual(code, 2)
+        self.assertIn("No repository roots found", err)
+
+    def test_find_reports_git_failure_and_continues_search(self):
+        bad, good = self.repo("bad"), self.repo("good")
+        run = self.git.run
+
+        def failing_run(path, *args, **kwargs):
+            if path == bad and args[0] == "for-each-ref":
+                raise GitError("cannot read refs")
+            return run(path, *args, **kwargs)
+
+        with patch.object(self.git, "run", side_effect=failing_run):
+            code, out, err = self.invoke("mgfind", "main", bad, good)
+        self.assertEqual(code, 1)
+        self.assertNotIn(str(bad), out)
+        self.assertIn(str(good), out)
+        self.assertIn(f"{bad}: cannot read refs", err)
+
+    def test_find_requires_pattern_and_rejects_conflicting_scopes(self):
+        for arguments in ([], ["--local", "--remotes", "*"]):
+            with self.subTest(arguments=arguments), patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    parser("mgfind").parse_args(arguments)
+                self.assertEqual(raised.exception.code, 2)
 
     def test_dirty_counts_include_staged_modified_untracked_and_renames(self):
         path = self.repo()
@@ -550,6 +675,11 @@ class GitTests(unittest.TestCase):
             self.assertIn(example, up_help)
         for example in ("mgstat *", "mgstat --non-default *", "mgstat --unpushed *", "mgstat --fetch --unpushed *"):
             self.assertIn(example, stat_help)
+        find_help = parser("mgfind").format_help()
+        for example in ("mgfind feature/search *", "mgfind '*ticket-123*' *",
+                        "mgfind 'feature/*' '/path/to/projects/*'", "mgfind --local 'fix/*' *",
+                        "mgfind --remotes 'origin/feature/*' *"):
+            self.assertIn(example, find_help)
 
 
 if __name__ == "__main__":

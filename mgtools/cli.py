@@ -8,7 +8,7 @@ import sys
 from typing import TextIO
 
 from .git import (
-    Git, GitError, Repository, decode, default_branch, discover, inspect,
+    Git, GitError, Repository, decode, default_branch, discover, inspect, matching_branches,
     push_status, remotes, tracking,
 )
 
@@ -36,7 +36,36 @@ STAT_EXAMPLES = examples([
 ])
 
 
+FIND_EXAMPLES = examples([
+    ("mgfind feature/search *", "Find an exact branch in repositories"),
+    ("mgfind '*ticket-123*' *", "Find branches containing ticket-123"),
+    ("mgfind 'feature/*' '/path/to/projects/*'", "Use branch and repository globs"),
+    ("mgfind --local 'fix/*' *", "Search only local branches"),
+    ("mgfind --remotes 'origin/feature/*' *", "Search cached remote branches"),
+])
+
+
 def parser(command: str) -> argparse.ArgumentParser:
+    if command == "mgfind":
+        result = argparse.ArgumentParser(
+            prog=command,
+            description="Find repositories containing matching local or cached remote branches.\n"
+                        "Searches all branches, not just the current checkout. Never fetches.\n"
+                        "Patterns are case-sensitive; quote wildcards to prevent shell expansion.",
+            epilog=FIND_EXAMPLES,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        result.add_argument("pattern", metavar="PATTERN",
+                            help="branch name or glob (*, ?, [abc]); remote prefix is optional")
+        result.add_argument("paths", nargs="*", default=["."], metavar="PATH",
+                            help="repository roots or glob patterns (default: current directory)")
+        scope = result.add_mutually_exclusive_group()
+        scope.add_argument("--local", dest="scope", action="store_const", const="local",
+                           help="search only local branches")
+        scope.add_argument("--remotes", dest="scope", action="store_const", const="remotes",
+                           help="search only cached remote branches")
+        result.set_defaults(scope="all")
+        return result
     updating = command == "mgup"
     description = (
         "Fetch and rebase repositories sequentially, merge the default branch into\n"
@@ -71,6 +100,13 @@ def parser(command: str) -> argparse.ArgumentParser:
 def display(value: str) -> str:
     """Keep pathnames and Git diagnostics on their intended terminal lines."""
     return "".join(char if char.isprintable() else repr(char)[1:-1] for char in value)
+
+
+def print_table(headers: list[str], rows: list[list[str]], out: TextIO) -> None:
+    table = [[display(cell) for cell in row] for row in [headers, *rows]]
+    widths = [max(len(row[column]) for row in table) for column in range(len(headers))]
+    for row in table:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip(), file=out)
 
 
 def action(git: Git, repo: Repository, args: list[str], out: TextIO, dry_run: bool = False) -> None:
@@ -216,8 +252,8 @@ def show_status(git: Git, repositories: list[Repository], options: argparse.Name
             row = [repo.label, state.branch_label, state.worktree]
             if options.unpushed:
                 row.append(push_status(git, repo.path, state))
-            rows.append([display(cell) for cell in row])
-            notes.append(display("; ".join(repo_notes)))
+            rows.append(row)
+            notes.append("; ".join(repo_notes))
         except GitError as exc:
             failed = True
             print(f"{display(repo.label)}: {display(str(exc))}", file=err)
@@ -225,9 +261,22 @@ def show_status(git: Git, repositories: list[Repository], options: argparse.Name
         headers.append("NOTES")
         for row, note in zip(rows, notes):
             row.append(note)
-    widths = [max(len(row[column]) for row in [headers, *rows]) for column in range(len(headers))]
-    for row in [headers, *rows]:
-        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip(), file=out)
+    print_table(headers, rows, out)
+    return failed
+
+
+def find_branches(git: Git, repositories: list[Repository], options: argparse.Namespace,
+                  out: TextIO, err: TextIO) -> bool:
+    rows = []
+    failed = False
+    for repo in repositories:
+        try:
+            for branch in matching_branches(git, repo.path, options.pattern, options.scope):
+                rows.append([repo.label, branch.name, branch.source])
+        except GitError as exc:
+            failed = True
+            print(f"{display(repo.label)}: {display(str(exc))}", file=err)
+    print_table(["REPOSITORY", "BRANCH", "SOURCE"], rows, out)
     return failed
 
 
@@ -246,6 +295,9 @@ def main(command: str, argv: list[str] | None = None, *, git: Git | None = None,
             return 2
         if command == "mgstat":
             failed = show_status(git, found.repositories, options, out, err)
+            return int(failed or bool(found.errors))
+        if command == "mgfind":
+            failed = find_branches(git, found.repositories, options, out, err)
             return int(failed or bool(found.errors))
         counts = {"updated": 0, "planned": 0, "skipped": 0, "failed": len(found.errors)}
         for repo in found.repositories:
@@ -273,3 +325,7 @@ def mgup() -> int:
 
 def mgstat() -> int:
     return main("mgstat")
+
+
+def mgfind() -> int:
+    return main("mgfind")
